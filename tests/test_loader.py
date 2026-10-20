@@ -79,3 +79,41 @@ def test_download_keeps_external_urls(resources_page, tmp_path):
     html = Path(path).read_text(encoding="utf-8")
     assert "https://cdn.example.com/banner.png" in html
     assert 'href="/courses/docker"' in html
+
+
+def test_download_skips_empty_resource_url(requests_mock, tmp_path):
+    html = '<html><body><img src="   "><script src=""></script></body></html>'
+    requests_mock.get(PAGE_URL, text=html)
+    path = download(PAGE_URL, str(tmp_path))
+    assert not (tmp_path / DIR_NAME).exists()
+    assert PAGE_NAME in path
+
+
+def test_download_link_rel_as_string(requests_mock, tmp_path):
+    html = '<html><head><link rel="stylesheet" href="assets/app.css"></head></html>'
+    css = b"body{}"
+    requests_mock.get(PAGE_URL, text=html)
+    requests_mock.get(RES_PREFIX + "app.css", content=css)
+    path = download(PAGE_URL, str(tmp_path))
+    files_dir = tmp_path / DIR_NAME
+    assert files_dir.exists()
+    html_out = Path(path).read_text(encoding="utf-8")
+    assert f"{DIR_NAME}/" in html_out
+
+
+def test_download_resource_http_error(requests_mock, tmp_path):
+    html = '<html><head><link rel="stylesheet" href="assets/app.css"></head></html>'
+    requests_mock.get(PAGE_URL, text=html)
+    requests_mock.get(RES_PREFIX + "app.css", status_code=500)
+    with pytest.raises(requests.HTTPError):
+        download(PAGE_URL, str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_resource_request_exception(requests_mock, tmp_path):
+    html = '<html><head><link rel="stylesheet" href="assets/app.css"></head></html>'
+    requests_mock.get(PAGE_URL, text=html)
+    requests_mock.get(RES_PREFIX + "app.css", exc=requests.RequestException("boom"))
+    with pytest.raises(requests.RequestException):
+        download(PAGE_URL, str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
