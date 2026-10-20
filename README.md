@@ -13,11 +13,10 @@
 
 ## Установка
 
-<!-- Опишите установку: клонирование, зависимости, переменные окружения -->
-
 ```bash
 git clone https://github.com/Spring-Silver-Bird/python-pytest-testing-project-79.git
 cd python-pytest-testing-project-79
+make install
 ```
 
 ## Использование
