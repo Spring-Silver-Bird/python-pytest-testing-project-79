@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 import requests
+from bs4 import BeautifulSoup
 
-from page_loader.loader import download
+from page_loader.loader import _resource_refs, download
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PAGE_URL = "https://ru.hexlet.io/courses"
@@ -117,3 +118,140 @@ def test_download_resource_request_exception(requests_mock, tmp_path):
     with pytest.raises(requests.RequestException):
         download(PAGE_URL, str(tmp_path))
     assert list(tmp_path.iterdir()) == []
+
+
+def test_download_page_request_exception(requests_mock, tmp_path):
+    requests_mock.get(PAGE_URL, exc=requests.RequestException("network down"))
+
+    with pytest.raises(requests.RequestException):
+        download(PAGE_URL, str(tmp_path))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_empty_html(requests_mock, tmp_path):
+    requests_mock.get(PAGE_URL, text="")
+
+    path = download(PAGE_URL, str(tmp_path))
+
+    assert Path(path).read_text(encoding="utf-8") == ""
+    assert not (tmp_path / DIR_NAME).exists()
+
+
+def test_download_output_dir_is_a_file(requests_mock, tmp_path):
+    target = tmp_path / "not-a-dir.txt"
+    target.write_text("x", encoding="utf-8")
+    requests_mock.get(PAGE_URL, text="<html></html>")
+
+    with pytest.raises(FileNotFoundError):
+        download(PAGE_URL, str(target))
+
+    assert requests_mock.call_count == 0
+
+
+def test_download_relative_resource_url(requests_mock, tmp_path):
+    html = '<html><head><link rel="stylesheet" href="assets/app.css"></head></html>'
+    requests_mock.get(PAGE_URL, text=html)
+    requests_mock.get(RES_PREFIX + "app.css", content=b"body{}")
+
+    path = download(PAGE_URL, str(tmp_path))
+
+    assert requests_mock.request_history[-1].url == RES_PREFIX + "app.css"
+    assert f"{DIR_NAME}/" in Path(path).read_text(encoding="utf-8")
+
+
+def test_download_reuses_duplicate_resource(requests_mock, tmp_path):
+    html = (
+        '<html><body><img src="/assets/pic.png">'
+        '<img src="/assets/pic.png"></body></html>'
+    )
+    requests_mock.get(PAGE_URL, text=html)
+    requests_mock.get(RES_PREFIX + "pic.png", content=b"png")
+
+    path = download(PAGE_URL, str(tmp_path))
+
+    resource_requests = [
+        request
+        for request in requests_mock.request_history
+        if request.url == RES_PREFIX + "pic.png"
+    ]
+    assert len(resource_requests) == 1
+    saved = list((tmp_path / DIR_NAME).iterdir())
+    assert len(saved) == 1
+    html_out = Path(path).read_text(encoding="utf-8")
+    assert html_out.count(f"{DIR_NAME}/{saved[0].name}") == 2
+
+
+def test_download_only_external_resources(requests_mock, tmp_path):
+    html = (
+        '<html><body><img src="https://cdn.example.com/banner.png">'
+        '<script src="https://cdn.example.com/app.js"></script></body></html>'
+    )
+    requests_mock.get(PAGE_URL, text=html)
+
+    path = download(PAGE_URL, str(tmp_path))
+
+    assert not (tmp_path / DIR_NAME).exists()
+    html_out = Path(path).read_text(encoding="utf-8")
+    assert "https://cdn.example.com/banner.png" in html_out
+    assert "https://cdn.example.com/app.js" in html_out
+
+
+def test_download_default_output_dir(requests_mock, tmp_path, monkeypatch):
+    requests_mock.get(PAGE_URL, text="<html><body><p>Hi</p></body></html>")
+    monkeypatch.chdir(tmp_path)
+
+    path = download(PAGE_URL)
+
+    assert path == str(tmp_path / PAGE_NAME)
+    assert Path(path).exists()
+
+
+def test_download_relative_output_dir_returns_absolute_path(
+    requests_mock, tmp_path, monkeypatch
+):
+    out = tmp_path / "out"
+    out.mkdir()
+    requests_mock.get(PAGE_URL, text="<html></html>")
+    monkeypatch.chdir(tmp_path)
+
+    path = download(PAGE_URL, "out")
+
+    assert path == str(out / PAGE_NAME)
+    assert Path(path).is_absolute()
+
+
+def test_resource_refs_collects_images_scripts_and_stylesheets():
+    html = (
+        '<html><head><link rel="stylesheet" href="a.css">'
+        '<link rel="icon" href="favicon.ico"></head>'
+        '<body><img src="pic.png"><script src="app.js"></script>'
+        "<script>console.log(1)</script></body></html>"
+    )
+    soup = BeautifulSoup(html, "html.parser")
+
+    refs = list(_resource_refs(soup))
+
+    assert [(tag.name, attr) for tag, attr in refs] == [
+        ("img", "src"),
+        ("script", "src"),
+        ("link", "href"),
+    ]
+
+
+def test_resource_refs_accepts_plain_string_rel():
+    soup = BeautifulSoup("<html></html>", "html.parser")
+    link = soup.new_tag("link", href="assets/app.css")
+    link["rel"] = "stylesheet"
+    soup.append(link)
+
+    assert list(_resource_refs(soup)) == [(link, "href")]
+
+
+def test_resource_refs_skips_non_stylesheet_string_rel():
+    soup = BeautifulSoup("<html></html>", "html.parser")
+    link = soup.new_tag("link", href="favicon.ico")
+    link["rel"] = "icon"
+    soup.append(link)
+
+    assert list(_resource_refs(soup)) == []
